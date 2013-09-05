@@ -4,6 +4,7 @@ import json
 import operator
 import binascii
 import base64
+import logging
 from ssl import SSLError
 from threading import Thread, Event, RLock
 
@@ -28,6 +29,8 @@ from .proto import mercury_pb2, metadata_pb2, playlist4changes_pb2, \
 base62 = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 APP_ID = 174829003346
 
+logger = logging.getLogger(__name__)
+
 
 class SpotifyDisconnectedError(Exception):
     def __init__(self):
@@ -47,30 +50,6 @@ class SpotifyTimeoutError(Exception):
     def __init__(self):
         Exception.__init__(self)
         self.message = "Request to Spotify timed out"
-
-
-class Logging():
-    log_level = 0
-
-    @staticmethod
-    def debug(str):
-        if Logging.log_level >= 3:
-            print "[DEBUG] " + str
-
-    @staticmethod
-    def notice(str):
-        if Logging.log_level >= 2:
-            print "[NOTICE] " + str
-
-    @staticmethod
-    def warn(str):
-        if Logging.log_level >= 1:
-            print "[WARN] " + str
-
-    @staticmethod
-    def error(str):
-        if Logging.log_level >= 0:
-            print "[ERROR] " + str
 
 
 class SpotifyClient(WebSocketClient):
@@ -212,7 +191,7 @@ class SpotifyAPI():
             if self.state is not SpotifyAPI.CONNECTING:
                 return False
 
-            Logging.notice("Connecting to {}...".format(self.settings["wss"]))
+            logger.info("Connecting to {}...".format(self.settings["wss"]))
 
             try:
                 self.ws = SpotifyClient(self.settings["wss"])
@@ -223,7 +202,7 @@ class SpotifyAPI():
                 return False
 
         if not self.logged_in_marker.wait(timeout=timeout):
-            Logging.debug("Aborting after unsuccessfully connecting for {} seconds.")
+            logger.debug("Aborting after unsuccessfully connecting for {} seconds.")
             self.disconnect()
             return False
         else:
@@ -232,12 +211,12 @@ class SpotifyAPI():
     def reconnect(self):
         assert self.username and self.password
 
-        Logging.debug("Reconnecting...")
+        logger.debug("Reconnecting...")
 
         self.disconnect()
 
         while not self.connect(self.username, self.password, timeout=10):
-            Logging.debug("Unsuccessful login")
+            logger.debug("Unsuccessful login")
 
     def disconnect(self, clear_settings=False, original_ws=None):
         with self.ws_lock:
@@ -257,7 +236,7 @@ class SpotifyAPI():
 
             self.state = SpotifyAPI.DISCONNECTING
 
-            Logging.debug("Disconnecting...")
+            logger.debug("Disconnecting...")
 
             self.ws.close()
             self.ws = None
@@ -271,15 +250,12 @@ class SpotifyAPI():
                 self.settings = None
 
             self.state = SpotifyAPI.DISCONNECTED
-            Logging.debug("Disconnected")
+            logger.debug("Disconnected")
 
     def shutdown(self):
-        Logging.debug("Shutting down...")
+        logger.debug("Shutting down...")
         self.disconnect()
         self.heartbeat_marker.set()
-
-    def set_log_level(self, level):
-        Logging.log_level = level
 
     @staticmethod
     def get_facebook_token(email, password):
@@ -331,14 +307,14 @@ class SpotifyAPI():
             self.password = password
 
         def early_exit(err):
-            Logging.error(err)
+            logger.error(err)
 
             if self.login_callback_func:
                 self.login_callback_func(False)
 
             return False
 
-        Logging.debug("Authenticating...")
+        logger.debug("Authenticating...")
 
         headers = {
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_9_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/31.0.1650.63 Safari/537.36"
@@ -396,7 +372,7 @@ class SpotifyAPI():
             "cf": "",
         }
 
-        Logging.notice("Normal login with payload:\n{}".format(login_payload))
+        logger.info("Normal login with payload:\n{}".format(login_payload))
 
         resp = session.post("https://" + self.auth_server + "/xhr/json/auth.php", data=login_payload, headers=headers)
         resp_json = resp.json()
@@ -419,7 +395,7 @@ class SpotifyAPI():
                 's': 'direct',
             }
 
-            Logging.notice("Normal login failed, trying Facebook login with payload:\n{}".format(login_payload))
+            logger.info("Normal login failed, trying Facebook login with payload:\n{}".format(login_payload))
 
             resp = session.post("https://" + self.auth_server + "/xhr/json/auth.php", data=login_payload,
                                 headers=headers)
@@ -445,12 +421,12 @@ class SpotifyAPI():
 
         self.settings["wss"] = "wss://" + wss_hostname + "/"
 
-        Logging.debug(str(self.settings))
+        logger.debug(str(self.settings))
 
         return True
 
     def login(self):
-        Logging.notice("Logging in")
+        logger.info("Logging in")
         credentials = self.settings["credentials"][0].split(":", 2)
         credentials[2] = credentials[2].decode("string_escape")
         # credentials_enc = json.dumps(credentials, separators=(',',':'))
@@ -458,7 +434,7 @@ class SpotifyAPI():
         self.wrap_request("connect", credentials, self.login_callback)
 
     def login_callback(self, resp):
-        Logging.debug("Login Complete")
+        logger.debug("Login Complete")
         self.user_info_request(self.populate_userdata_callback)
 
     def populate_userdata_callback(self, resp):
@@ -483,7 +459,7 @@ class SpotifyAPI():
                 self.heartbeat_thread.daemon = True
                 self.heartbeat_thread.start()
         else:
-            Logging.error("Please upgrade to Premium")
+            logger.error("Please upgrade to Premium")
             self.disconnect()
 
         self.logged_in_marker.set()
@@ -546,9 +522,9 @@ class SpotifyAPI():
                 break
 
         if available:
-            Logging.notice(SpotifyUtil.gid2uri("track", track.gid) + " is available!")
+            logger.info(SpotifyUtil.gid2uri("track", track.gid) + " is available!")
         else:
-            Logging.notice(SpotifyUtil.gid2uri("track", track.gid) + " is NOT available!")
+            logger.info(SpotifyUtil.gid2uri("track", track.gid) + " is NOT available!")
 
         return available
 
@@ -589,7 +565,7 @@ class SpotifyAPI():
         for uri in uris:
             uri_type = SpotifyUtil.get_uri_type(uri)
             if uri_type == "local":
-                Logging.warn("Track with URI " + uri + " is a local track, we can't request metadata, skipping")
+                logger.warning("Track with URI " + uri + " is a local track, we can't request metadata, skipping")
                 continue
 
             id = SpotifyUtil.uri2id(uri)
@@ -637,7 +613,7 @@ class SpotifyAPI():
         elif content_type == "vnd.spotify/metadata-track":
             obj = metadata_pb2.Track()
         else:
-            Logging.error("Unrecognised metadata type " + content_type)
+            logger.error("Unrecognised metadata type " + content_type)
             return False
 
         obj.ParseFromString(body)
@@ -697,7 +673,7 @@ class SpotifyAPI():
             res = base64.decodestring(resp[1])
             obj.ParseFromString(res)
         except Exception as e:
-            Logging.error(
+            logger.error(
                 "There was a problem while parsing discover info. Message: " + str(e) + ". Resp: " + str(resp))
             obj = False
 
@@ -720,7 +696,7 @@ class SpotifyAPI():
             obj.ParseFromString(res)
             return obj
         except Exception as e:
-            Logging.error(
+            logger.error(
                 "There was a problem while parsing radio stations info. Message: " + str(e) + ". Resp: " + str(resp))
             return False
 
@@ -741,7 +717,7 @@ class SpotifyAPI():
             obj.ParseFromString(res)
             return obj
         except Exception as e:
-            Logging.error(
+            logger.error(
                 "There was a problem while parsing radio genre list info. Message: " + str(e) + ". Resp: " + str(resp))
             return False
 
@@ -777,12 +753,12 @@ class SpotifyAPI():
             obj.ParseFromString(res)
             return obj
         except Exception as e:
-            Logging.error("There was a problem while parsing radio tracks. Message: " + str(e) + ". Resp: " + str(resp))
+            logger.error("There was a problem while parsing radio tracks. Message: " + str(e) + ". Resp: " + str(resp))
             return False
 
     def playlists_request(self, user, fromnum=0, num=100, callback=None):
         if num > 100:
-            Logging.error("You may only request up to 100 playlists at once")
+            logger.error("You may only request up to 100 playlists at once")
             return False
 
         mercury_request = mercury_pb2.MercuryRequest()
@@ -931,7 +907,7 @@ class SpotifyAPI():
 
     def search_request(self, query, query_type="all", max_results=50, offset=0, callback=None):
         if max_results > 50:
-            Logging.warn("Maximum of 50 results per request, capping at 50")
+            logger.warning("Maximum of 50 results per request, capping at 50")
             max_results = 50
 
         search_types = {
@@ -1028,9 +1004,9 @@ class SpotifyAPI():
 
                 self.ws.send(msg_enc)
 
-                Logging.debug("Sent PID({}) with msg: {}".format(pid, msg_enc))
+                logger.debug("Sent PID({}) with msg: {}".format(pid, msg_enc))
         except (SSLError, StreamClosed) as e:
-            Logging.error("SSL error ({}), attempting to continue".format(e))
+            logger.error("SSL error ({}), attempting to continue".format(e))
             promise.rejected(SpotifyDisconnectedError())
 
         return promise
@@ -1062,7 +1038,7 @@ class SpotifyAPI():
             raise last_exception or SpotifyTimeoutError()
 
     def recv_packet(self, msg):
-        Logging.debug("recv " + str(msg))
+        logger.debug("recv " + str(msg))
         packet = json.loads(str(msg))
         if "error" in packet:
             self.handle_error(packet)
@@ -1075,10 +1051,10 @@ class SpotifyAPI():
                 promise = self.cmd_promises.pop(pid)
                 promise.fulfill(packet["result"])
             else:
-                Logging.warn("Unhandled command response with id " + str(pid))
+                logger.warning("Unhandled command response with id " + str(pid))
 
     def work_callback(self, resp):
-        Logging.debug("Got ack for message reply")
+        logger.debug("Got ack for message reply")
 
     def handle_message(self, msg):
         cmd = msg[0]
@@ -1089,7 +1065,7 @@ class SpotifyAPI():
             payload = None
 
         if cmd == "do_work":
-            Logging.debug("Got do_work message, payload: " + payload)
+            logger.debug("Got do_work message, payload: " + payload)
             self.wrap_request("sp/work_done", ["v1"], self.work_callback)
         elif cmd == "ping_flash2":
             if len(msg[1]) >= 20:
@@ -1167,7 +1143,7 @@ class SpotifyAPI():
                     else:
                         output.append(arr[val])
                 pong = u' '.join(map(unicode, output))
-                Logging.debug("Sending pong %s" % pong)
+                logger.debug("Sending pong %s" % pong)
                 self.send_command("sp/pong_flash2", [pong, ])
         elif cmd == "login_complete":
             pass
@@ -1175,7 +1151,7 @@ class SpotifyAPI():
 
     def handle_error(self, err):
         if len(err) < 2:
-            Logging.error("Unknown error " + str(err))
+            logger.error("Unknown error " + str(err))
 
         major = err["error"][0]
         minor = err["error"][1]
@@ -1216,7 +1192,7 @@ class SpotifyAPI():
                 promise = self.cmd_promises.pop(pid)
                 promise.reject(SpotifyCommandError(major, minor, error_str))
 
-        Logging.error(error_str)
+        logger.error(error_str)
 
     def heartbeat_handler(self):
         stop = False
