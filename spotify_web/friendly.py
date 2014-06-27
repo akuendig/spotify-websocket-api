@@ -2,6 +2,7 @@ from functools import partial
 from lxml import etree
 from threading import Thread
 from Queue import Queue
+from urllib2 import urlopen
 
 from .spotify import SpotifyAPI, SpotifyUtil
 from tunigoapi import Tunigo
@@ -134,6 +135,10 @@ class SpotifyTrack(SpotifyMetadataObject):
             return resp["uri"] if urlOnly else resp
         else:
             return False
+
+    def getFile(self):
+        with urlopen(first_track.getFileURL()) as req:
+            return req.read()
 
     @Cache
     def getAlbum(self, nameOnly=False):
@@ -616,7 +621,8 @@ class Spotify():
     def __init__(self, username, password):
         self.api = SpotifyAPI()
         self.api.connect(username, password)
-        self.tunigo = Tunigo(region=self.api.country)
+
+        self.tunigo = Tunigo()
 
     def logged_in(self):
         return self.api.is_logged_in and not self.api.disconnecting

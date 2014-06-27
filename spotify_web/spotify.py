@@ -13,6 +13,11 @@ import uuid
 import requests
 from ws4py.client.threadedclient import WebSocketClient
 
+import mechanize
+import cookielib
+import urllib
+from urlparse import urlparse, parse_qs
+
 from .proto import mercury_pb2, metadata_pb2, playlist4changes_pb2,\
     playlist4ops_pb2, playlist4service_pb2, toplist_pb2, bartender_pb2, \
     radio_pb2
@@ -22,10 +27,11 @@ from .proto import mercury_pb2, metadata_pb2, playlist4changes_pb2,\
 
 
 base62 = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+APP_ID = 174829003346
 
 
 class Logging():
-    log_level = 1
+    log_level = 0
 
     @staticmethod
     def debug(str):
@@ -169,6 +175,46 @@ class SpotifyAPI():
         self.login_callback = login_callback_func
         self.is_logged_in = False
 
+    def get_facebook_token(self, email, password):
+        # Browser
+        br = mechanize.Browser()
+
+        # Browser options
+        br.set_handle_equiv(True)
+        br.set_handle_redirect(True)
+        br.set_handle_referer(True)
+        br.set_handle_robots(False)
+
+        # Follows refresh 0 but not hangs on refresh > 0
+        br.set_handle_refresh(mechanize._http.HTTPRefreshProcessor(), max_time=1)
+
+        # Want debugging messages?
+        # br.set_debug_http(True)
+        # br.set_debug_redirects(True)
+        # br.set_debug_responses(True)
+
+        br.addheaders = [
+            ('User-agent', 'Mozilla/5.0 (X11; U; Linux i686; en-US; rv:1.9.0.1) Gecko/2008071615  Fedora/3.0.1-1.fc9 Firefox/3.0.1')
+        ]
+        
+        payload = {
+            'client_id': APP_ID,
+            'redirect_uri': 'https://www.facebook.com/connect/login_success.html',
+            'response_type': 'token',
+        }
+
+        br.open('https://graph.facebook.com/oauth/authorize?' + urllib.urlencode(payload))
+
+        br.select_form(nr=0)
+        br['email'] = email
+        br['pass'] = password
+
+        resp = br.submit()
+
+        fragment = parse_qs(urlparse(resp.geturl()).fragment)
+
+        return fragment['access_token'][0]
+
     def auth(self, username, password):
         if self.settings is not None:
             Logging.warn("You must only authenticate once per API object")
@@ -225,7 +271,7 @@ class SpotifyAPI():
         landingURL = r.groups()[0]
 
         login_payload = {
-            "type": "sp",
+            "type": "fb",
             "username": username,
             "password": password,
             "secret": secret,
@@ -241,9 +287,30 @@ class SpotifyAPI():
         resp_json = resp.json()
 
         if resp_json["status"] != "OK":
-            Logging.error("There was a problem authenticating, authentication failed")
-            self.do_login_callback(False)
-            return False
+            # Try facebook login
+            token = self.get_facebook_token(username, password)
+            login_payload = {
+                'type': 'fb',
+                'fbuid': 1659862757,
+                'token': token,
+                'secret': secret,
+                'trackingId': trackingId,
+                "referrer": referrer,
+                'landingURL': landingURL,
+                'cf': '',
+                'f': 'login',
+                's': 'direct',
+            }
+
+            Logging.notice(str(login_payload))
+
+            resp = session.post("https://" + self.auth_server + "/xhr/json/auth.php", data=login_payload, headers=headers)
+            resp_json = resp.json()
+
+            if resp_json["status"] != "OK":
+                Logging.error("There was a problem authenticating, authentication failed: {}".format(resp_json))
+                self.do_login_callback(False)
+                return False
 
         self.settings = resp.json()["config"]
 
@@ -307,11 +374,11 @@ class SpotifyAPI():
         else:
             self.logged_in_marker.set()
 
-    def track_uri(self, track, callback=False):
+    def track_uri(self, track, callback=False, prefix="mp3160"):
         track = self.recurse_alternatives(track)
         if not track:
             return False
-        args = ["mp3160", SpotifyUtil.gid2id(track.gid)]
+        args = [prefix, SpotifyUtil.gid2id(track.gid)]
         return self.wrap_request("sp/track_uri", args, callback)
 
     def parse_metadata(self, sp, resp, callback_data):
