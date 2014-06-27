@@ -736,6 +736,8 @@ class Spotify():
         if len(uris) == 0:
             return [] if asArray else None
 
+        uris = [SpotifyUtil.url2uri(uri) or uri for uri in uris]
+
         uri_type = SpotifyUtil.get_uri_type(uris[0])
         if not uri_type:
             return [] if asArray else None

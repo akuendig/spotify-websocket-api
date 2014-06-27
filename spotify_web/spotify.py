@@ -113,7 +113,7 @@ class SpotifyUtil():
             res = [v % 62] + res
             v /= 62
         id = ''.join([base62[i] for i in res])
-        return ("spotify:"+uritype+":"+id.rjust(22, "0"))
+        return "spotify:"+uritype+":"+id.rjust(22, "0")
 
     @staticmethod
     def uri2id(uri):
@@ -152,6 +152,19 @@ class SpotifyUtil():
     @staticmethod
     def is_local(uri):
         return SpotifyUtil.get_uri_type(uri) == "local"
+
+    @staticmethod
+    def url2uri(url):
+        # http://open.spotify.com/user/spotify/playlist/0CoQk8bVPF1famEAZ5BYE4
+        # spotify:user:spotify:playlist:0CoQk8bVPF1famEAZ5BYE4
+        if not url.startswith("http://open.spotify.com"):
+            return None
+
+        url = url.replace("http://open.spotify.com/", '')
+        url = url.replace("/", ":")
+
+        return "spotify:" + url
+
 
 
 class SpotifyAPI():
@@ -475,12 +488,12 @@ class SpotifyAPI():
 
             # enable this to help debug restriction issues
             if False:
-                print restriction
-                print allowed_countries
-                print forbidden_countries
-                print "allowed: "+str(allowed)
-                print "forbidden: "+str(forbidden)
-                print "applicable: "+str(applicable)
+                print(restriction)
+                print(allowed_countries)
+                print(forbidden_countries)
+                print("allowed: " + str(allowed))
+                print("forbidden: " + str(forbidden))
+                print("applicable: " + str(applicable))
 
             available = True == allowed and False == forbidden and True == applicable
             if available:
@@ -610,7 +623,7 @@ class SpotifyAPI():
         try:
             res = base64.decodestring(resp[1])
             obj.ParseFromString(res)
-        except Exception, e:
+        except Exception as e:
             Logging.error("There was a problem while parsing discover info. Message: " + str(e) + ". Resp: " + str(resp))
             obj = False
         self.chain_callback(sp, obj, callback_data)
@@ -629,7 +642,7 @@ class SpotifyAPI():
         try:
             res = base64.decodestring(resp[1])
             obj.ParseFromString(res)
-        except Exception, e:
+        except Exception as e:
             Logging.error("There was a problem while parsing radio stations info. Message: " + str(e) + ". Resp: " + str(resp))
             obj = False
         self.chain_callback(sp, obj, callback_data)
@@ -648,7 +661,7 @@ class SpotifyAPI():
         try:
             res = base64.decodestring(resp[1])
             obj.ParseFromString(res)
-        except Exception, e:
+        except Exception as e:
             Logging.error("There was a problem while parsing radio genre list info. Message: " + str(e) + ". Resp: " + str(resp))
             obj = False
         self.chain_callback(sp, obj, callback_data)
@@ -682,7 +695,7 @@ class SpotifyAPI():
         try:
             res = base64.decodestring(resp[1])
             obj.ParseFromString(res)
-        except Exception, e:
+        except Exception as e:
             Logging.error("There was a problem while parsing radio tracks. Message: " + str(e) + ". Resp: " + str(resp))
             obj = False
         self.chain_callback(sp, obj, callback_data)
