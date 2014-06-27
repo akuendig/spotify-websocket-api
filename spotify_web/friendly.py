@@ -3,6 +3,7 @@ from lxml import etree
 from threading import Thread
 from Queue import Queue
 from urllib2 import urlopen
+from contextlib import closing
 
 from .spotify import SpotifyAPI, SpotifyUtil
 from tunigoapi import Tunigo
@@ -137,8 +138,8 @@ class SpotifyTrack(SpotifyMetadataObject):
             return False
 
     def getFile(self):
-        with urlopen(first_track.getFileURL()) as req:
-            return req.read()
+        with closing(urlopen(self.getFileURL())) as res:
+            return res.read()
 
     @Cache
     def getAlbum(self, nameOnly=False):
