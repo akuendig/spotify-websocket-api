@@ -7,6 +7,8 @@ import base64
 from ssl import SSLError
 from threading import Thread, Event, Lock
 
+from aplus import Promise
+
 from random import randint
 import uuid
 
@@ -14,20 +16,21 @@ import requests
 from ws4py.client.threadedclient import WebSocketClient
 
 import mechanize
-import cookielib
 import urllib
 from urlparse import urlparse, parse_qs
 
-from .proto import mercury_pb2, metadata_pb2, playlist4changes_pb2,\
+from .proto import mercury_pb2, metadata_pb2, playlist4changes_pb2, \
     playlist4ops_pb2, playlist4service_pb2, toplist_pb2, bartender_pb2, \
     radio_pb2
-
-# from .proto import playlist4meta_pb2, playlist4issues_pb2,
-# playlist4content_pb2
 
 
 base62 = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 APP_ID = 174829003346
+
+
+class DisconnectedError(Exception):
+    def __repr__(self):
+        return "The websocket to Spotify is disconnected"
 
 
 class Logging():
@@ -54,39 +57,12 @@ class Logging():
             print "[ERROR] " + str
 
 
-class WrapAsync():
-    timeout = 10
-
-    def __init__(self, callback, func, *args):
-        self.marker = Event()
-
-        if callback is None:
-            callback = self.callback
-        elif type(callback) == list:
-            callback = callback+[self.callback]
-        else:
-            callback = [callback, self.callback]
-
-        self.data = False
-        func(*args, callback=callback)
-
-    def callback(self, *args):
-        self.data = args
-        self.marker.set()
-
-    def get_data(self):
-        try:
-            self.marker.wait(timeout=self.timeout)
-
-            if len(self.data) > 0 and type(self.data[0] == SpotifyAPI):
-                self.data = self.data[1:]
-
-            return self.data if len(self.data) > 1 else self.data[0]
-        except:
-            return False
-
-
 class SpotifyClient(WebSocketClient):
+    def __init__(self, url, protocols=None, extensions=None, heartbeat_freq=None,
+                 ssl_options=None, headers=None):
+        super(SpotifyClient, self).__init__(url, protocols, extensions, heartbeat_freq, ssl_options, headers)
+        self.api_object = None
+
     def set_api(self, api):
         self.api_object = api
 
@@ -96,8 +72,8 @@ class SpotifyClient(WebSocketClient):
     def received_message(self, m):
         self.api_object.recv_packet(m)
 
-    def closed(self, code, message):
-        self.api_object.shutdown()
+    def closed(self, code, message=None):
+        self.api_object.disconnect()
 
 
 class SpotifyUtil():
@@ -113,7 +89,7 @@ class SpotifyUtil():
             res = [v % 62] + res
             v /= 62
         id = ''.join([base62[i] for i in res])
-        return "spotify:"+uritype+":"+id.rjust(22, "0")
+        return "spotify:" + uritype + ":" + id.rjust(22, "0")
 
     @staticmethod
     def uri2id(uri):
@@ -166,9 +142,12 @@ class SpotifyUtil():
         return "spotify:" + url
 
 
-
 class SpotifyAPI():
-    def __init__(self, login_callback_func=False):
+    INIT = 0
+    CONNECTED = 1
+    DISCONNECTED = 2
+
+    def __init__(self, login_callback_func=None):
         self.auth_server = "play.spotify.com"
 
         self.logged_in_marker = Event()
@@ -184,8 +163,8 @@ class SpotifyAPI():
         self.ws = None
         self.ws_lock = Lock()
         self.seq = 0
-        self.cmd_callbacks = {}
-        self.login_callback = login_callback_func
+        self.cmd_promises = {}
+        self.login_callback_func = login_callback_func or (lambda x: self.logged_in_marker.set())
         self.is_logged_in = False
 
     def get_facebook_token(self, email, password):
@@ -207,9 +186,10 @@ class SpotifyAPI():
         # br.set_debug_responses(True)
 
         br.addheaders = [
-            ('User-agent', 'Mozilla/5.0 (X11; U; Linux i686; en-US; rv:1.9.0.1) Gecko/2008071615  Fedora/3.0.1-1.fc9 Firefox/3.0.1')
+            ('User-agent',
+             'Mozilla/5.0 (X11; U; Linux i686; en-US; rv:1.9.0.1) Gecko/2008071615  Fedora/3.0.1-1.fc9 Firefox/3.0.1')
         ]
-        
+
         payload = {
             'client_id': APP_ID,
             'redirect_uri': 'https://www.facebook.com/connect/login_success.html',
@@ -234,7 +214,6 @@ class SpotifyAPI():
             return False
 
         headers = {
-            #"User-Agent": "node-spotify-web in python (Chrome/13.37 compatible-ish)",
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_9_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/31.0.1650.63 Safari/537.36"
         }
 
@@ -243,13 +222,13 @@ class SpotifyAPI():
         resp = session.get("https://" + self.auth_server, headers=headers)
         data = resp.text
 
-        #csrftoken
+        # csrftoken
         rx = re.compile("\"csrftoken\":\"(.*?)\"")
         r = rx.search(data)
 
         if not r or len(r.groups()) < 1:
             Logging.error("There was a problem authenticating, no auth secret found")
-            self.do_login_callback(False)
+            self.login_callback_func(False)
             return False
         secret = r.groups()[0]
 
@@ -259,7 +238,7 @@ class SpotifyAPI():
 
         if not r or len(r.groups()) < 1:
             Logging.error("There was a problem authenticating, no auth trackingId found")
-            self.do_login_callback(False)
+            self.login_callback_func(False)
             return False
         trackingId = r.groups()[0]
 
@@ -269,7 +248,7 @@ class SpotifyAPI():
 
         if not r or len(r.groups()) < 1:
             Logging.error("There was a problem authenticating, no auth referrer found")
-            self.do_login_callback(False)
+            self.login_callback_func(False)
             return False
         referrer = r.groups()[0]
 
@@ -279,7 +258,7 @@ class SpotifyAPI():
 
         if not r or len(r.groups()) < 1:
             Logging.error("There was a problem authenticating, no auth landingURL found")
-            self.do_login_callback(False)
+            self.login_callback_func(False)
             return False
         landingURL = r.groups()[0]
 
@@ -288,10 +267,10 @@ class SpotifyAPI():
             "username": username,
             "password": password,
             "secret": secret,
-            "trackingId":trackingId,
+            "trackingId": trackingId,
             "referrer": referrer,
             "landingURL": landingURL,
-            "cf":"",
+            "cf": "",
         }
 
         Logging.notice(str(login_payload))
@@ -317,12 +296,13 @@ class SpotifyAPI():
 
             Logging.notice(str(login_payload))
 
-            resp = session.post("https://" + self.auth_server + "/xhr/json/auth.php", data=login_payload, headers=headers)
+            resp = session.post("https://" + self.auth_server + "/xhr/json/auth.php", data=login_payload,
+                                headers=headers)
             resp_json = resp.json()
 
             if resp_json["status"] != "OK":
                 Logging.error("There was a problem authenticating, authentication failed: {}".format(resp_json))
-                self.do_login_callback(False)
+                self.login_callback_func(False)
                 return False
 
         self.settings = resp.json()["config"]
@@ -332,7 +312,8 @@ class SpotifyAPI():
             "client": "24:0:0:" + str(self.settings["version"])
         }
 
-        resp = session.get('http://' + self.settings["aps"]["resolver"]["hostname"], params=resolver_payload, headers=headers)
+        resp = session.get('http://' + self.settings["aps"]["resolver"]["hostname"], params=resolver_payload,
+                           headers=headers)
 
         resp_json = resp.json()
         wss_hostname = resp_json["ap_list"][0].split(":")[0]
@@ -344,7 +325,7 @@ class SpotifyAPI():
     def populate_userdata_callback(self, sp, resp):
 
         # Send screen size
-        self.send_command("sp/log", [41, 1, 0, 0, 0, 0], None)
+        self.send_command("sp/log", [41, 1, 0, 0, 0, 0])
 
         self.username = resp["user"]
         self.country = resp["country"]
@@ -365,12 +346,9 @@ class SpotifyAPI():
             heartbeat_thread.daemon = True
             heartbeat_thread.start()
 
-        if self.login_callback:
-            self.do_login_callback(self.is_logged_in)
-        else:
-            self.logged_in_marker.set()
+        self.login_callback_func(self.is_logged_in)
 
-    def logged_in(self, sp, resp):
+    def login_callback(self, sp, resp):
         self.user_info_request(self.populate_userdata_callback)
 
     def login(self):
@@ -379,13 +357,7 @@ class SpotifyAPI():
         credentials[2] = credentials[2].decode("string_escape")
         # credentials_enc = json.dumps(credentials, separators=(',',':'))
 
-        self.send_command("connect", credentials, self.logged_in)
-
-    def do_login_callback(self, result):
-        if self.login_callback:
-            Thread(target=self.login_callback, args=(self, result)).start()
-        else:
-            self.logged_in_marker.set()
+        self.send_command("connect", credentials).add_callback(self.login_callback)
 
     def track_uri(self, track, callback=False, prefix="mp3160"):
         track = self.recurse_alternatives(track)
@@ -465,10 +437,10 @@ class SpotifyAPI():
 
         for restriction in track.restriction:
             allowed_str = restriction.countries_allowed
-            allowed_countries += [allowed_str[i:i+2] for i in range(0, len(allowed_str), 2)]
+            allowed_countries += [allowed_str[i:i + 2] for i in range(0, len(allowed_str), 2)]
 
             forbidden_str = restriction.countries_forbidden
-            forbidden_countries += [forbidden_str[i:i+2] for i in range(0, len(forbidden_str), 2)]
+            forbidden_countries += [forbidden_str[i:i + 2] for i in range(0, len(forbidden_str), 2)]
 
             allowed = not restriction.HasField("countries_allowed") or country in allowed_countries
             forbidden = self.country in forbidden_countries and len(forbidden_countries) > 0
@@ -534,7 +506,7 @@ class SpotifyAPI():
         else:
             header = mercury_pb2.MercuryRequest()
             header.body = "GET"
-            header.uri = "hm://metadata/"+metadata_type+"s"
+            header.uri = "hm://metadata/" + metadata_type + "s"
             header.content_type = "vnd.spotify/mercury-mget-request"
 
             header_str = base64.encodestring(header.SerializeToString())
@@ -543,19 +515,27 @@ class SpotifyAPI():
 
         return args
 
-    def wrap_request(self, command, args, callback, int_callback=None, retries=3):
-        if not callback:
-            for attempt in range(0, retries):
-                data = WrapAsync(int_callback, self.send_command, command, args).get_data()
-                if data:
-                    break
-            return data
+    def wrap_request(self, command, args, callback=None, transform=None, retries=3):
+        assert retries >= 1
+        assert not callback or hasattr(callback, '__call__')
+        assert not transform or hasattr(transform, '__call__')
+
+        if callback:
+            promise = self.send_command(command, args).then(transform)
+            promise.done(callback)
+            return promise
         else:
-            callback = [callback] if type(callback) != list else callback
-            if int_callback is not None:
-                int_callback = [int_callback] if type(int_callback) != list else int_callback
-                callback += int_callback
-            self.send_command(command, args, callback)
+            last_exception = None
+
+            for attempt in range(0, retries):
+                promise = self.send_command(command, args).then(transform)
+
+                try:
+                    return promise.get()
+                except Exception as e:
+                    last_exception = e
+
+            raise last_exception
 
     def metadata_request(self, uris, callback=False):
         mercury_requests = mercury_pb2.MercuryMultiGetRequest()
@@ -566,14 +546,14 @@ class SpotifyAPI():
         for uri in uris:
             uri_type = SpotifyUtil.get_uri_type(uri)
             if uri_type == "local":
-                Logging.warn("Track with URI "+uri+" is a local track, we can't request metadata, skipping")
+                Logging.warn("Track with URI " + uri + " is a local track, we can't request metadata, skipping")
                 continue
 
             id = SpotifyUtil.uri2id(uri)
 
             mercury_request = mercury_pb2.MercuryRequest()
             mercury_request.body = "GET"
-            mercury_request.uri = "hm://metadata/"+uri_type+"/"+id
+            mercury_request.uri = "hm://metadata/" + uri_type + "/" + id
 
             mercury_requests.request.extend([mercury_request])
 
@@ -581,21 +561,22 @@ class SpotifyAPI():
 
         return self.wrap_request("sp/hm_b64", args, callback, self.parse_metadata)
 
-    def toplist_request(self, toplist_content_type="track", toplist_type="user", username=None, region="global", callback=False):
+    def toplist_request(self, toplist_content_type="track", toplist_type="user", username=None, region="global",
+                        callback=False):
         if username is None:
             username = self.username
 
         mercury_request = mercury_pb2.MercuryRequest()
         mercury_request.body = "GET"
         if toplist_type == "user":
-            mercury_request.uri = "hm://toplist/toplist/user/"+username
+            mercury_request.uri = "hm://toplist/toplist/user/" + username
         elif toplist_type == "region":
             mercury_request.uri = "hm://toplist/toplist/region"
             if region is not None and region != "global":
-                mercury_request.uri += "/"+region
+                mercury_request.uri += "/" + region
         else:
             return False
-        mercury_request.uri += "?type="+toplist_content_type
+        mercury_request.uri += "?type=" + toplist_content_type
 
         # playlists don't appear to work?
         if toplist_type == "user" and toplist_content_type == "playlist":
@@ -607,7 +588,10 @@ class SpotifyAPI():
 
         args = [0, req]
 
-        return self.wrap_request("sp/hm_b64", args, callback, self.parse_toplist)
+        res = self\
+            .send_command("sp/hm_b64", args)\
+            .then(self.parse_toplist)
+
 
     def discover_request(self, callback=False):
         mercury_request = mercury_pb2.MercuryRequest()
@@ -624,7 +608,8 @@ class SpotifyAPI():
             res = base64.decodestring(resp[1])
             obj.ParseFromString(res)
         except Exception as e:
-            Logging.error("There was a problem while parsing discover info. Message: " + str(e) + ". Resp: " + str(resp))
+            Logging.error(
+                "There was a problem while parsing discover info. Message: " + str(e) + ". Resp: " + str(resp))
             obj = False
         self.chain_callback(sp, obj, callback_data)
 
@@ -643,7 +628,8 @@ class SpotifyAPI():
             res = base64.decodestring(resp[1])
             obj.ParseFromString(res)
         except Exception as e:
-            Logging.error("There was a problem while parsing radio stations info. Message: " + str(e) + ". Resp: " + str(resp))
+            Logging.error(
+                "There was a problem while parsing radio stations info. Message: " + str(e) + ". Resp: " + str(resp))
             obj = False
         self.chain_callback(sp, obj, callback_data)
 
@@ -662,29 +648,30 @@ class SpotifyAPI():
             res = base64.decodestring(resp[1])
             obj.ParseFromString(res)
         except Exception as e:
-            Logging.error("There was a problem while parsing radio genre list info. Message: " + str(e) + ". Resp: " + str(resp))
+            Logging.error(
+                "There was a problem while parsing radio genre list info. Message: " + str(e) + ". Resp: " + str(resp))
             obj = False
         self.chain_callback(sp, obj, callback_data)
 
     # Station uri can be a track, artist, or genre (spotify:genre:[genre_id])
     def radio_tracks_request(self, stationUri, stationId=None, salt=None, num_tracks=20, callback=False):
         if salt == None:
-            max32int = pow(2,31) - 1
-            salt     = randint(1,max32int)
+            max32int = pow(2, 31) - 1
+            salt = randint(1, max32int)
 
         if stationId == None:
             stationId = uuid.uuid4().hex
 
-        radio_request           = radio_pb2.RadioRequest()
-        radio_request.salt      = salt
-        radio_request.length    = num_tracks
+        radio_request = radio_pb2.RadioRequest()
+        radio_request.salt = salt
+        radio_request.length = num_tracks
         radio_request.stationId = stationId
         radio_request.uris.append(stationUri)
         req_args = base64.encodestring(radio_request.SerializeToString())
 
-        mercury_request      = mercury_pb2.MercuryRequest()
+        mercury_request = mercury_pb2.MercuryRequest()
         mercury_request.body = "GET"
-        mercury_request.uri  = "hm://radio/"
+        mercury_request.uri = "hm://radio/"
         req = base64.encodestring(mercury_request.SerializeToString())
 
         args = [0, req, req_args]
@@ -707,7 +694,7 @@ class SpotifyAPI():
 
         mercury_request = mercury_pb2.MercuryRequest()
         mercury_request.body = "GET"
-        mercury_request.uri = "hm://playlist/user/"+user+"/rootlist?from=" + str(fromnum) + "&length=" + str(num)
+        mercury_request.uri = "hm://playlist/user/" + user + "/rootlist?from=" + str(fromnum) + "&length=" + str(num)
         req = base64.encodestring(mercury_request.SerializeToString())
 
         args = [0, req]
@@ -736,11 +723,11 @@ class SpotifyAPI():
             extras = "?includefollowedartists=true"
         else:
             return []
-        
+
         mercury_request = mercury_pb2.MercuryRequest()
         mercury_request.body = "GET"
         mercury_request.uri = "hm://collection-web/v1/" + self.username + "/" + action + extras
-                
+
         req = base64.encodestring(mercury_request.SerializeToString())
         args = [0, req]
 
@@ -757,11 +744,11 @@ class SpotifyAPI():
             if playlist[3] == "starred":
                 playlist_id = "starred"
             else:
-                playlist_id = "playlist/"+playlist[4]
+                playlist_id = "playlist/" + playlist[4]
 
         mercury_request = mercury_pb2.MercuryRequest()
         mercury_request.body = op
-        mercury_request.uri = "hm://playlist/user/"+user+"/" + playlist_id + "?syncpublished=1"
+        mercury_request.uri = "hm://playlist/user/" + user + "/" + playlist_id + "?syncpublished=1"
         req = base64.encodestring(mercury_request.SerializeToString())
         args = [0, req, base64.encodestring(track_uri)]
         return self.wrap_request("sp/hm_b64", args, callback)
@@ -774,9 +761,9 @@ class SpotifyAPI():
 
     def set_starred(self, track_uri, starred=True, callback=False):
         if starred:
-            return self.playlist_add_track("spotify:user:"+self.username+":starred", track_uri, callback)
+            return self.playlist_add_track("spotify:user:" + self.username + ":starred", track_uri, callback)
         else:
-            return self.playlist_remove_track("spotify:user:"+self.username+":starred", track_uri, callback)
+            return self.playlist_remove_track("spotify:user:" + self.username + ":starred", track_uri, callback)
 
     def playlist_op(self, op, path, optype="update", name=None, index=None, callback=None):
         mercury_request = mercury_pb2.MercuryRequest()
@@ -803,16 +790,16 @@ class SpotifyAPI():
         return self.wrap_request("sp/hm_b64", args, callback, self.new_playlist_callback)
 
     def new_playlist(self, name, callback=False):
-        return self.playlist_op("PUT", "playlist/user/"+self.username, name=name, callback=callback)
+        return self.playlist_op("PUT", "playlist/user/" + self.username, name=name, callback=callback)
 
     def rename_playlist(self, playlist_uri, name, callback=False):
-        path = "playlist/user/"+self.username+"/playlist/"+playlist_uri.split(":")[4]+"?syncpublished=true"
+        path = "playlist/user/" + self.username + "/playlist/" + playlist_uri.split(":")[4] + "?syncpublished=true"
         return self.playlist_op("MODIFY", path, name=name, callback=callback)
 
     def remove_playlist(self, playlist_uri, callback=False):
         return self.playlist_op_track("rootlist", playlist_uri, "REMOVE", callback=callback)
-        #return self.playlist_op("REMOVE", "playlist/user/"+self.username+"/rootlist?syncpublished=true",
-                                #optype="remove", index=index, callback=callback)
+        # return self.playlist_op("REMOVE", "playlist/user/"+self.username+"/rootlist?syncpublished=true",
+        #optype="remove", index=index, callback=callback)
 
     def new_playlist_callback(self, sp, data, callback_data):
         try:
@@ -823,7 +810,7 @@ class SpotifyAPI():
 
         mercury_request = mercury_pb2.MercuryRequest()
         mercury_request.body = "ADD"
-        mercury_request.uri = "hm://playlist/user/"+self.username+"/rootlist?add_first=1&syncpublished=1"
+        mercury_request.uri = "hm://playlist/user/" + self.username + "/rootlist?add_first=1&syncpublished=1"
         req = base64.encodestring(mercury_request.SerializeToString())
         args = [0, req, base64.encodestring(reply.uri)]
 
@@ -845,7 +832,8 @@ class SpotifyAPI():
 
         query_type = [k for k, v in search_types.items()] if query_type == "all" else query_type
         query_type = [query_type] if type(query_type) != list else query_type
-        query_type = reduce(operator.or_, [search_types[type_name] for type_name in query_type if type_name in search_types])
+        query_type = reduce(operator.or_,
+                            [search_types[type_name] for type_name in query_type if type_name in search_types])
 
         args = [query, query_type, max_results, offset]
 
@@ -855,7 +843,7 @@ class SpotifyAPI():
         return self.wrap_request("sp/user_info", [], callback)
 
     def heartbeat(self):
-        self.send_command("sp/echo", "h", callback=False)
+        self.send_command("sp/echo", "h")
 
     def send_track_end(self, lid, track_uri, ms_played, callback=False):
         ms_played = int(ms_played)
@@ -875,7 +863,9 @@ class SpotifyAPI():
         referrer_version = "0.1.0"
         referrer_vendor = "com.spotify"
         max_continuous = ms_played
-        args = [lid, ms_played, ms_played_union, n_seeks_forward, n_seeks_backward, ms_seeks_forward, ms_seeks_backward, ms_latency, display_track, play_context, source_start, source_end, reason_start, reason_end, referrer, referrer_version, referrer_vendor, max_continuous]
+        args = [lid, ms_played, ms_played_union, n_seeks_forward, n_seeks_backward, ms_seeks_forward, ms_seeks_backward,
+                ms_latency, display_track, play_context, source_start, source_end, reason_start, reason_end, referrer,
+                referrer_version, referrer_vendor, max_continuous]
         return self.wrap_request("sp/track_end", args, callback)
 
     def send_track_event(self, lid, event, ms_where, callback=False):
@@ -896,35 +886,43 @@ class SpotifyAPI():
         referrer = "unknown"
         referrer_version = "0.1.0"
         referrer_vendor = "com.spotify"
-        args = [lid, source_start, reason_start, int(ms_played), int(ms_latency), play_context, display_track, referrer, referrer_version, referrer_vendor]
+        args = [lid, source_start, reason_start, int(ms_played), int(ms_latency), play_context, display_track, referrer,
+                referrer_version, referrer_vendor]
         return self.wrap_request("sp/track_progress", args, callback)
 
     def send_command(self, name, args=None, callback=None):
-        if not args:
-            args = []
+        promise = Promise()
+
         msg = {
             "name": name,
             "id": str(self.seq),
-            "args": args
+            "args": args or []
         }
 
-        if callback is not None:
-            self.cmd_callbacks[self.seq] = callback
-        self.seq += 1
-
-        self.send_string(msg)
-
-    def send_string(self, msg):
-        if self.disconnecting:
-            return
-
         msg_enc = json.dumps(msg, separators=(',', ':'))
-        Logging.debug("sent " + msg_enc)
+
         try:
             with self.ws_lock:
+                if self.ws is None or self.disconnecting:
+                    return Promise.rejected(DisconnectedError())
+
+                pid = self.seq
+
+                if callback:
+                    promise.addCallback(callback)
+                else:
+                    promise.addCallback(
+                        lambda _: Logging.debug("No callback was requested for command {}, ignoring".format(pid))
+                    )
+
+                self.cmd_promises[pid] = promise
+                self.seq += 1
+
                 self.ws.send(msg_enc)
-        except SSLError:
-            Logging.notice("SSL error, attempting to continue")
+
+                Logging.debug("Sent PID({}) with msg: {}".format(pid, msg_enc))
+        except SSLError as e:
+            Logging.error("SSL error ({}), attempting to continue".format(e))
 
     def recv_packet(self, msg):
         Logging.debug("recv " + str(msg))
@@ -936,22 +934,12 @@ class SpotifyAPI():
             self.handle_message(packet["message"])
         elif "id" in packet:
             pid = packet["id"]
-            if pid in self.cmd_callbacks:
-                callback = self.cmd_callbacks[pid]
 
-                if not callback:
-                    Logging.debug("No callback was requested for command " + str(pid) + ", ignoring")
-                elif type(callback) == list:
-                    if len(callback) > 1:
-                        callback[0](self, packet["result"], callback[1:])
-                    else:
-                        callback[0](self, packet["result"])
-                else:
-                    callback(self, packet["result"])
-
-                self.cmd_callbacks.pop(pid)
+            if pid in self.cmd_promises:
+                promise = self.cmd_promises.pop(pid)
+                promise.fulfill(packet["result"])
             else:
-                Logging.debug("Unhandled command response with id " + str(pid))
+                Logging.warn("Unhandled command response with id " + str(pid))
 
     def work_callback(self, sp, resp):
         Logging.debug("Got ack for message reply")
@@ -961,23 +949,73 @@ class SpotifyAPI():
         if len(msg) > 1:
             payload = msg[1]
         if cmd == "do_work":
-            Logging.debug("Got do_work message, payload: "+payload)
-            self.send_command("sp/work_done", ["v1"], self.work_callback)
+            Logging.debug("Got do_work message, payload: " + payload)
+            self.send_command("sp/work_done", ["v1"]).addCallback(self.work_callback)
         if cmd == "ping_flash2":
             if len(msg[1]) >= 20:
                 key = [
-                           {'idx' : 8, 'xor' : 146},
-                           {'idx' : 14, 'map' : [54,55,56,56,57,58,59,60,61,62,62,63,64,65,66,67,68,68,69,70,71,72,73,73,74,75,76,77,78,79,79,80,81,82,83,84,85,85,86,87,88,89,90,90,91,92,93,94,95,96,96,97,98,99,100,101,102,102,103,104,105,106,107,107,0,0,1,2,3,4,5,5,6,7,8,9,10,11,11,12,13,14,15,16,17,17,18,19,20,21,22,22,23,24,25,26,27,28,28,29,30,31,32,33,34,34,35,36,37,38,39,39,40,41,42,43,44,45,45,46,47,48,49,50,51,51,52,53,163,164,164,165,166,167,168,169,170,170,171,172,173,174,175,175,176,177,178,179,180,181,181,182,183,184,185,186,187,187,188,189,190,191,192,192,193,194,195,196,197,198,198,199,200,201,202,203,204,204,205,206,207,208,209,209,210,211,212,213,214,215,215,216,108,109,110,111,112,113,113,114,115,116,117,118,119,119,120,121,122,123,124,124,125,126,127,128,129,130,130,131,132,133,134,135,136,136,137,138,139,140,141,141,142,143,144,145,146,147,147,148,149,150,151,152,153,153,154,155,156,157,158,158,159,160,161,162]},
-                           {'idx' : 17, 'xor' : 173},
-                           {'idx' : 5, 'xor' : 4},
-                           {'idx' : 10, 'xor' : 178},
-                           {'idx' : 6, 'xor' : 200},
-                           {'idx' : 4, 'xor' : 124},
-                           {'idx' : 3, 'map' : [232,231,230,229,236,235,234,233,224,223,222,221,228,227,226,225,248,247,246,245,252,251,250,249,240,239,238,237,244,243,242,241,200,199,198,197,204,203,202,201,192,191,190,189,196,195,194,193,216,215,214,213,220,219,218,217,208,207,206,205,212,211,210,209,29,29,29,29,30,29,29,29,28,28,28,28,29,29,29,28,31,31,31,30,31,31,31,31,30,30,30,30,30,30,30,30,26,26,26,26,26,26,26,26,25,255,254,253,26,25,25,25,28,27,27,27,28,28,28,28,27,27,27,26,27,27,27,27,36,35,35,35,36,36,36,36,35,35,35,34,35,35,35,35,37,37,37,37,38,37,37,37,36,36,36,36,37,37,37,36,32,32,32,32,33,33,33,32,32,31,31,31,32,32,32,32,34,34,34,34,34,34,34,34,33,33,33,33,34,33,33,33,42,42,42,42,42,42,42,42,41,41,41,41,42,41,41,41,44,43,43,43,44,44,44,44,43,43,43,42,43,43,43,43,39,39,39,38,39,39,39,39,38,38,38,38,38,38,38,38,40,40,40,40,41,41,41,40,40,39,39,39,40,40,40,40]},
-                           {'idx' : 7, 'map' : [6,5,7,7,9,8,10,9,0,0,2,1,3,2,4,4,17,16,18,18,20,19,21,21,11,11,13,12,14,14,16,15,28,28,30,29,31,30,32,32,23,22,24,23,25,25,27,26,39,39,41,40,42,42,44,43,34,33,35,35,37,36,38,37,51,50,52,51,53,53,55,54,45,44,46,46,48,47,49,49,62,61,63,63,65,64,66,65,56,56,58,57,59,58,60,60,73,72,74,74,76,75,77,77,67,67,69,68,70,70,72,71,84,84,86,85,87,86,88,88,79,78,80,79,81,81,83,82,95,95,97,96,98,98,100,99,90,89,91,91,93,92,94,93,107,106,108,107,109,109,111,110,101,100,102,102,104,103,105,105,118,117,119,119,121,120,122,121,112,112,114,113,115,114,116,116,129,128,130,130,132,131,133,133,123,123,125,124,126,126,128,127,140,140,142,141,143,142,144,144,135,134,136,135,137,137,139,138,151,151,153,152,154,154,156,155,146,145,147,147,149,148,150,149,163,162,164,163,165,165,167,166,157,156,158,158,160,159,161,161,174,173,175,175,177,176,178,177,168,168,170,169,171,170,172,172]},
-                           {'idx' : 12, 'map' : [65,68,60,63,75,78,70,73,45,47,40,42,55,57,50,52,25,27,20,22,35,37,30,32,5,7,0,2,15,17,10,12,146,148,141,143,156,158,151,153,126,128,120,123,136,138,131,133,105,108,100,103,115,118,110,113,85,88,80,83,95,98,90,93,226,229,221,224,236,239,231,234,206,209,201,204,216,219,211,214,186,189,181,183,196,199,191,194,166,168,161,163,176,178,171,173,30,30,30,30,31,32,31,31,28,28,28,28,29,29,29,29,26,26,26,26,27,27,27,27,246,249,241,244,25,25,252,254,38,39,38,38,39,40,39,39,36,37,36,36,37,38,37,37,34,35,34,34,35,36,35,35,32,33,32,32,33,34,33,33,46,47,46,46,47,48,47,47,44,45,44,44,45,46,45,45,42,43,42,42,43,44,43,43,40,41,40,40,41,42,41,41,54,55,54,54,55,56,55,55,52,53,52,52,53,54,53,53,50,51,50,50,51,52,51,51,48,49,48,48,49,50,49,49,63,63,62,62,64,64,63,63,60,61,60,60,61,62,61,61,58,59,58,58,59,60,59,59,56,57,56,56,57,58,57,57]},
-                      ]
-                input = [ int(x) for x in msg[1].split(" ") ]
+                    {'idx': 8, 'xor': 146},
+                    {'idx': 14,
+                     'map': [54, 55, 56, 56, 57, 58, 59, 60, 61, 62, 62, 63, 64, 65, 66, 67, 68, 68, 69, 70, 71, 72, 73,
+                             73, 74, 75, 76, 77, 78, 79, 79, 80, 81, 82, 83, 84, 85, 85, 86, 87, 88, 89, 90, 90, 91, 92,
+                             93, 94, 95, 96, 96, 97, 98, 99, 100, 101, 102, 102, 103, 104, 105, 106, 107, 107, 0, 0, 1,
+                             2, 3, 4, 5, 5, 6, 7, 8, 9, 10, 11, 11, 12, 13, 14, 15, 16, 17, 17, 18, 19, 20, 21, 22, 22,
+                             23, 24, 25, 26, 27, 28, 28, 29, 30, 31, 32, 33, 34, 34, 35, 36, 37, 38, 39, 39, 40, 41, 42,
+                             43, 44, 45, 45, 46, 47, 48, 49, 50, 51, 51, 52, 53, 163, 164, 164, 165, 166, 167, 168, 169,
+                             170, 170, 171, 172, 173, 174, 175, 175, 176, 177, 178, 179, 180, 181, 181, 182, 183, 184,
+                             185, 186, 187, 187, 188, 189, 190, 191, 192, 192, 193, 194, 195, 196, 197, 198, 198, 199,
+                             200, 201, 202, 203, 204, 204, 205, 206, 207, 208, 209, 209, 210, 211, 212, 213, 214, 215,
+                             215, 216, 108, 109, 110, 111, 112, 113, 113, 114, 115, 116, 117, 118, 119, 119, 120, 121,
+                             122, 123, 124, 124, 125, 126, 127, 128, 129, 130, 130, 131, 132, 133, 134, 135, 136, 136,
+                             137, 138, 139, 140, 141, 141, 142, 143, 144, 145, 146, 147, 147, 148, 149, 150, 151, 152,
+                             153, 153, 154, 155, 156, 157, 158, 158, 159, 160, 161, 162]},
+                    {'idx': 17, 'xor': 173},
+                    {'idx': 5, 'xor': 4},
+                    {'idx': 10, 'xor': 178},
+                    {'idx': 6, 'xor': 200},
+                    {'idx': 4, 'xor': 124},
+                    {'idx': 3,
+                     'map': [232, 231, 230, 229, 236, 235, 234, 233, 224, 223, 222, 221, 228, 227, 226, 225, 248, 247,
+                             246, 245, 252, 251, 250, 249, 240, 239, 238, 237, 244, 243, 242, 241, 200, 199, 198, 197,
+                             204, 203, 202, 201, 192, 191, 190, 189, 196, 195, 194, 193, 216, 215, 214, 213, 220, 219,
+                             218, 217, 208, 207, 206, 205, 212, 211, 210, 209, 29, 29, 29, 29, 30, 29, 29, 29, 28, 28,
+                             28, 28, 29, 29, 29, 28, 31, 31, 31, 30, 31, 31, 31, 31, 30, 30, 30, 30, 30, 30, 30, 30, 26,
+                             26, 26, 26, 26, 26, 26, 26, 25, 255, 254, 253, 26, 25, 25, 25, 28, 27, 27, 27, 28, 28, 28,
+                             28, 27, 27, 27, 26, 27, 27, 27, 27, 36, 35, 35, 35, 36, 36, 36, 36, 35, 35, 35, 34, 35, 35,
+                             35, 35, 37, 37, 37, 37, 38, 37, 37, 37, 36, 36, 36, 36, 37, 37, 37, 36, 32, 32, 32, 32, 33,
+                             33, 33, 32, 32, 31, 31, 31, 32, 32, 32, 32, 34, 34, 34, 34, 34, 34, 34, 34, 33, 33, 33, 33,
+                             34, 33, 33, 33, 42, 42, 42, 42, 42, 42, 42, 42, 41, 41, 41, 41, 42, 41, 41, 41, 44, 43, 43,
+                             43, 44, 44, 44, 44, 43, 43, 43, 42, 43, 43, 43, 43, 39, 39, 39, 38, 39, 39, 39, 39, 38, 38,
+                             38, 38, 38, 38, 38, 38, 40, 40, 40, 40, 41, 41, 41, 40, 40, 39, 39, 39, 40, 40, 40, 40]},
+                    {'idx': 7,
+                     'map': [6, 5, 7, 7, 9, 8, 10, 9, 0, 0, 2, 1, 3, 2, 4, 4, 17, 16, 18, 18, 20, 19, 21, 21, 11, 11,
+                             13, 12, 14, 14, 16, 15, 28, 28, 30, 29, 31, 30, 32, 32, 23, 22, 24, 23, 25, 25, 27, 26, 39,
+                             39, 41, 40, 42, 42, 44, 43, 34, 33, 35, 35, 37, 36, 38, 37, 51, 50, 52, 51, 53, 53, 55, 54,
+                             45, 44, 46, 46, 48, 47, 49, 49, 62, 61, 63, 63, 65, 64, 66, 65, 56, 56, 58, 57, 59, 58, 60,
+                             60, 73, 72, 74, 74, 76, 75, 77, 77, 67, 67, 69, 68, 70, 70, 72, 71, 84, 84, 86, 85, 87, 86,
+                             88, 88, 79, 78, 80, 79, 81, 81, 83, 82, 95, 95, 97, 96, 98, 98, 100, 99, 90, 89, 91, 91,
+                             93, 92, 94, 93, 107, 106, 108, 107, 109, 109, 111, 110, 101, 100, 102, 102, 104, 103, 105,
+                             105, 118, 117, 119, 119, 121, 120, 122, 121, 112, 112, 114, 113, 115, 114, 116, 116, 129,
+                             128, 130, 130, 132, 131, 133, 133, 123, 123, 125, 124, 126, 126, 128, 127, 140, 140, 142,
+                             141, 143, 142, 144, 144, 135, 134, 136, 135, 137, 137, 139, 138, 151, 151, 153, 152, 154,
+                             154, 156, 155, 146, 145, 147, 147, 149, 148, 150, 149, 163, 162, 164, 163, 165, 165, 167,
+                             166, 157, 156, 158, 158, 160, 159, 161, 161, 174, 173, 175, 175, 177, 176, 178, 177, 168,
+                             168, 170, 169, 171, 170, 172, 172]},
+                    {'idx': 12,
+                     'map': [65, 68, 60, 63, 75, 78, 70, 73, 45, 47, 40, 42, 55, 57, 50, 52, 25, 27, 20, 22, 35, 37, 30,
+                             32, 5, 7, 0, 2, 15, 17, 10, 12, 146, 148, 141, 143, 156, 158, 151, 153, 126, 128, 120, 123,
+                             136, 138, 131, 133, 105, 108, 100, 103, 115, 118, 110, 113, 85, 88, 80, 83, 95, 98, 90, 93,
+                             226, 229, 221, 224, 236, 239, 231, 234, 206, 209, 201, 204, 216, 219, 211, 214, 186, 189,
+                             181, 183, 196, 199, 191, 194, 166, 168, 161, 163, 176, 178, 171, 173, 30, 30, 30, 30, 31,
+                             32, 31, 31, 28, 28, 28, 28, 29, 29, 29, 29, 26, 26, 26, 26, 27, 27, 27, 27, 246, 249, 241,
+                             244, 25, 25, 252, 254, 38, 39, 38, 38, 39, 40, 39, 39, 36, 37, 36, 36, 37, 38, 37, 37, 34,
+                             35, 34, 34, 35, 36, 35, 35, 32, 33, 32, 32, 33, 34, 33, 33, 46, 47, 46, 46, 47, 48, 47, 47,
+                             44, 45, 44, 44, 45, 46, 45, 45, 42, 43, 42, 42, 43, 44, 43, 43, 40, 41, 40, 40, 41, 42, 41,
+                             41, 54, 55, 54, 54, 55, 56, 55, 55, 52, 53, 52, 52, 53, 54, 53, 53, 50, 51, 50, 50, 51, 52,
+                             51, 51, 48, 49, 48, 48, 49, 50, 49, 49, 63, 63, 62, 62, 64, 64, 63, 63, 60, 61, 60, 60, 61,
+                             62, 61, 61, 58, 59, 58, 58, 59, 60, 59, 59, 56, 57, 56, 56, 57, 58, 57, 57]},
+                ]
+                input = [int(x) for x in msg[1].split(" ")]
                 output = []
                 for k in key:
                     idx = k.get('idx', None)
@@ -985,18 +1023,19 @@ class SpotifyAPI():
                     arr = k.get('map', None)
                     val = input[idx]
                     if xor != None:
-                        output.append(val^xor)
+                        output.append(val ^ xor)
                     else:
                         output.append(arr[val])
                 pong = u' '.join(map(unicode, output))
                 Logging.debug("Sending pong %s" % pong)
-                self.send_command("sp/pong_flash2", [pong,], None)
+                self.send_command("sp/pong_flash2", [pong, ])
         if cmd == "login_complete":
             Logging.debug("Login Complete")
-	    self.user_info_request(self.populate_userdata_callback)
+            self.user_info_request(self.populate_userdata_callback)
+
     def handle_error(self, err):
         if len(err) < 2:
-            Logging.error("Unknown error "+str(err))
+            Logging.error("Unknown error " + str(err))
 
         major = err["error"][0]
         minor = err["error"][1]
@@ -1042,7 +1081,7 @@ class SpotifyAPI():
             self.username = username
             self.password = password
 
-        Logging.notice("Connecting to "+self.settings["wss"])
+        Logging.notice("Connecting to " + self.settings["wss"])
 
         try:
             self.ws = SpotifyClient(self.settings["wss"])
@@ -1059,6 +1098,12 @@ class SpotifyAPI():
             self.disconnect()
             return False
 
+    def reconnect(self):
+        assert self.username and self.password
+
+        self.disconnect()
+        self.connect(self.username, self.password)
+
     def set_log_level(self, level):
         Logging.log_level = level
 
@@ -1067,5 +1112,17 @@ class SpotifyAPI():
         self.heartbeat_marker.set()
 
     def disconnect(self):
-        if self.ws is not None:
-            self.ws.close()
+        with self.ws_lock:
+            assert not self.disconnecting
+
+            if self.ws is not None:
+                self.ws.close()
+                self.ws = None
+
+            self.logged_in_marker = Event()
+
+            self.settings = None
+
+            self.seq = 0
+            self.cmd_promises = {}
+            self.is_logged_in = False
