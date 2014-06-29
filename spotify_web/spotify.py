@@ -165,7 +165,7 @@ class SpotifyAPI():
     DISCONNECTING = 3
     DISCONNECTED = 4
 
-    def __init__(self, login_callback_func=None, settings=None):
+    def __init__(self, login_callback_func=None, settings=None, fb_access_token=None):
         self.auth_server = "play.spotify.com"
 
         self.logged_in_marker = Event()
@@ -177,7 +177,7 @@ class SpotifyAPI():
         self.account_type = None
         self.country = None
 
-        self._cached_facebook_token = None
+        self.fb_access_token = fb_access_token
 
         self.settings = settings
 
@@ -223,7 +223,7 @@ class SpotifyAPI():
                 return False
 
         if not self.logged_in_marker.wait(timeout=timeout):
-            self.disconnect()
+            self.disconnect(True)
             return False
         else:
             return self.is_logged_in
@@ -238,7 +238,7 @@ class SpotifyAPI():
         while not self.connect(self.username, self.password, timeout=10):
             Logging.debug("Unsuccessful login")
 
-    def disconnect(self):
+    def disconnect(self, clear_settings=False):
         with self.ws_lock:
             if self.state == SpotifyAPI.INIT or self.ws is None:
                 return
@@ -256,6 +256,9 @@ class SpotifyAPI():
 
             self.seq = 0
             self.cmd_promises = {}
+
+            if clear_settings:
+                self.settings = None
 
             self.state = SpotifyAPI.DISCONNECTED
             Logging.debug("Disconnected")
@@ -390,8 +393,8 @@ class SpotifyAPI():
 
         if resp_json["status"] != "OK":
             # Try facebook login
-            token = self._cached_facebook_token or self.get_facebook_token(username, password)
-            self._cached_facebook_token = token
+            token = self.fb_access_token or self.get_facebook_token(username, password)
+            self.fb_access_token = token
 
             login_payload = {
                 'type': 'fb',
@@ -413,6 +416,8 @@ class SpotifyAPI():
             resp_json = resp.json()
 
             if resp_json["status"] != "OK":
+                self.fb_access_token = None
+
                 early_exit("There was a problem authenticating, authentication failed: {}".format(resp_json))
 
         self.settings = resp.json()["config"]
@@ -469,7 +474,7 @@ class SpotifyAPI():
                 self.heartbeat_thread.start()
         else:
             Logging.error("Please upgrade to Premium")
-            self.disconnect()
+            self.disconnect(True)
 
         self.logged_in_marker.set()
 

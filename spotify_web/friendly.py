@@ -15,8 +15,9 @@ CONFIG_STORAGE = os.path.abspath(os.path.expanduser('~/.spotifywebapirc'))
 
 
 class StoredSettings():
-    def __init__(self, settings):
+    def __init__(self, settings, fb_access_token=None):
         self.settings = settings
+        self.fb_access_token = fb_access_token
 
 
 class Cache(object):
@@ -312,18 +313,17 @@ class SpotifyPlaylist(SpotifyObject):
         return "Starred" if self.getID() == "starred" else self.obj.attributes.name
 
     def getDescription(self):
-        return self.obj.attributes.description if self.obj != None and self.obj.attributes.description != None else ""
+        return self.obj.attributes.description if self.obj is not None and self.obj.attributes.description is not None else ""
 
     def getImages(self):
-        if self.obj != None and self.obj.attributes.picture != None:
+        if self.obj is not None and self.obj.attributes.picture is not None:
             images = {}
-            size  = 300
+            size = 300
             image_url = Spotify.imageFromId(SpotifyUtil.gid2id(self.obj.attributes.picture), size)
-            if image_url != None:
+            if image_url is not None:
                 images[size] = image_url
                 return images
         return None
-
 
     def rename(self, name):
         ret = self.spotify.api.rename_playlist(self.getURI(), name)
@@ -425,7 +425,8 @@ class SpotifySearch():
         self.populate()
 
     def populate(self):
-        xml = self.spotify.api.search_request(self.query, query_type=self.query_type, max_results=self.max_results, offset=self.offset)
+        xml = self.spotify.api.search_request(self.query, query_type=self.query_type, max_results=self.max_results,
+                                              offset=self.offset)
         xml = xml[38:]  # trim UTF8 declaration
         self.result = etree.fromstring(xml)
 
@@ -441,7 +442,7 @@ class SpotifySearch():
         self.populate()
 
     def getName(self):
-        return "Search "+self.query_type+": "+self.query
+        return "Search " + self.query_type + ": " + self.query
 
     def getTracks(self):
         return self.getObjByID(self.result, "track")
@@ -459,7 +460,7 @@ class SpotifySearch():
         return self.getObjByURI(self.result, "playlist")
 
     def getObjByID(self, result, obj_type):
-        elems = result.find(obj_type+"s")
+        elems = result.find(obj_type + "s")
         if elems is None:
             elems = []
         ids = [elem[0].text for elem in list(elems)]
@@ -467,7 +468,7 @@ class SpotifySearch():
         return objs
 
     def getObjByURI(self, result, obj_type):
-        elems = result.find(obj_type+"s")
+        elems = result.find(obj_type + "s")
         if elems is None:
             elems = []
         uris = [elem[0].text for elem in list(elems)]
@@ -499,6 +500,7 @@ class SpotifyToplist():
             return []
         return self.spotify.objectFromID(self.toplist_content_type, self.toplist.items)
 
+
 class SpotifyLink():
     def __init__(self, spotify, obj):
         self.spotify = spotify
@@ -524,18 +526,20 @@ class SpotifyLink():
     def getObject(self):
         return self.spotify.objectFromURI(self.uri, asArray=False)
 
+
 class SpotifyReasonField():
     def __init__(self, spotify, obj, index):
         self.spotify = spotify
-        self.text  = obj.text
-        self.uri   = obj.uri
+        self.text = obj.text
+        self.uri = obj.uri
         self.index = index
+
 
 class SpotifyReason():
     def __init__(self, spotify, obj):
         self.spotify = spotify
-        self.text    = obj.text
-        self.fields  = []
+        self.text = obj.text
+        self.fields = []
         i = 0
         for field in obj.fields:
             self.fields.append(SpotifyReasonField(spotify, field, i))
@@ -570,13 +574,14 @@ class SpotifyStory():
     def getObject(self):
         return self.recommended_item.getObject()
 
+
 class SpotifyRadio(object):
     def __init__(self, spotify, obj, id, title, title_uri, last_listen):
-        self.spotify     = spotify
-        self.obj         = obj
-        self.id          = id
-        self.title       = title
-        self.title_uri   = title_uri
+        self.spotify = spotify
+        self.obj = obj
+        self.id = id
+        self.title = title
+        self.title_uri = title_uri
         self.last_listen = last_listen
 
     def getURI(self):
@@ -589,17 +594,18 @@ class SpotifyRadio(object):
         return self.title
 
     def getImages(self):
-        if self.obj != None and self.obj.imageUri != None:
+        if self.obj is not None and self.obj.imageUri is not None:
             image_id = ""
             if self.obj.imageUri.startswith('spotify:image:'):
                 image_id = self.obj.imageUri.replace('spotify:image:', '')
             elif self.obj.imageUri.startswith("spotify:mosaic:"):
-                image_id = self.obj.imageUri.replace('spotify:mosaic:', '')[0:40] # Pick the first image in the mosaic only
+                image_id = self.obj.imageUri.replace('spotify:mosaic:', '')[
+                           0:40]  # Pick the first image in the mosaic only
 
             if image_id != "":
                 images = {}
                 image_url = Spotify.imageFromId(image_id, 300)
-                if image_url != None:
+                if image_url is not None:
                     images[300] = image_url
                     return images
         return None
@@ -608,19 +614,23 @@ class SpotifyRadio(object):
         return self.image_uri
 
     def getTracks(self, num_tracks=20):
-        track_uris  = []
-        result = self.spotify.api.radio_tracks_request(stationUri=self.getURI(), stationId=self.getId(), num_tracks=num_tracks)
+        track_uris = []
+        result = self.spotify.api.radio_tracks_request(stationUri=self.getURI(), stationId=self.getId(),
+                                                       num_tracks=num_tracks)
         for track_gid in result.gids:
             track_uris.append("spotify:track:" + track_gid)
         return self.spotify.objectFromURI(track_uris, asArray=True)
+
 
 class SpotifyRadioStation(SpotifyRadio):
     def __init__(self, spotify, obj):
         SpotifyRadio.__init__(self, spotify, obj, obj.id, obj.title, obj.seeds[0], obj.lastListen)
 
+
 class SpotifyRadioGenre(SpotifyRadio):
     def __init__(self, spotify, obj):
         SpotifyRadio.__init__(self, spotify, obj, uuid.uuid4().hex, obj.name, 'spotify:genre:' + str(obj.id), 0)
+
 
 class Spotify():
     AUTOREPLACE_TRACKS = True
@@ -628,10 +638,16 @@ class Spotify():
     def __init__(self, username, password, use_config=False):
         if use_config:
             def on_login(success):
-                if success:
-                    self.store_settings(self.api.settings)
+                assert success
 
-            self.api = SpotifyAPI(on_login, self.load_settings())
+                self.store_settings(self.api.settings, self.api.fb_access_token)
+
+            stored_settings = self.load_settings()
+            self.api = SpotifyAPI(
+                on_login,
+                settings=stored_settings.get('settings'),
+                fb_access_token=stored_settings.get('fb_access_token'),
+            )
         else:
             self.api = SpotifyAPI()
 
@@ -643,20 +659,24 @@ class Spotify():
         import cPickle
 
         if not os.path.exists(CONFIG_STORAGE):
-            return None
+            return {}
 
         with open(CONFIG_STORAGE, 'r') as f:
-            stored_settings = cPickle.load(f)
+            return cPickle.load(f) or {}
 
-        return None if stored_settings is None else stored_settings.settings
-
-    def store_settings(self, settings):
+    def store_settings(self, settings, fb_access_token):
         assert settings
 
         import cPickle
 
         with open(CONFIG_STORAGE, 'w') as f:
-            cPickle.dump(StoredSettings(settings=settings), f)
+            cPickle.dump(
+                {
+                    'settings': settings,
+                    'fb_access_token': fb_access_token,
+                },
+                f
+            )
 
     def reconnect(self):
         return self.api.reconnect()
@@ -680,7 +700,7 @@ class Spotify():
         username = self.api.userid if username is None else username
         playlist_uris = []
         if username == self.api.userid:
-            playlist_uris += ["spotify:user:"+username+":starred"]
+            playlist_uris += ["spotify:user:" + username + ":starred"]
 
         playlist_uris += [playlist.uri for playlist in self.api.playlists_request(username).contents.items]
         return self.objectFromURI(playlist_uris)
@@ -715,7 +735,7 @@ class Spotify():
     def getNewReleases(self):
         al_json = self.tunigo.getNewReleases()
 
-        album_uris  = []
+        album_uris = []
         for item_json in al_json['items']:
             album_uris.append(item_json['release']['uri'])
 
@@ -729,14 +749,14 @@ class Spotify():
         return stories
 
     def getRadioStations(self):
-        stations  = []
+        stations = []
         result = self.api.radio_stations_request()
         for station in result.stations:
             stations.append(SpotifyRadioStation(self, station))
         return stations
 
     def getRadioGenres(self):
-        genres  = []
+        genres = []
         result = self.api.radio_genres_request()
         for genre in result.genres:
             genres.append(SpotifyRadioGenre(self, genre))
@@ -825,7 +845,7 @@ class Spotify():
     def parse_tunigo_playlists(self, pl_json):
         playlists = []
         for item_json in pl_json['items']:
-            playlist_uri  = item_json['playlist']['uri']
+            playlist_uri = item_json['playlist']['uri']
 
             uri_parts = playlist_uri.split(':')
             if len(uri_parts) < 2:
@@ -874,7 +894,7 @@ class Spotify():
 
             image_id = SpotifyUtil.gid2id(image_obj.file_id) if must_convert_to_id else image_obj.file_id
             image_url = Spotify.imageFromId(image_id, size)
-            if image_url != None:
+            if image_url is not None:
                 images[size] = image_url
 
         return images
