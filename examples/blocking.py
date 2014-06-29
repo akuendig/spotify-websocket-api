@@ -45,7 +45,7 @@ elif action == "album":
         print track.name
 
 elif action == "playlists":
-    username = sys.argv[4] if len(sys.argv) > 4 else sp.username
+    username = sys.argv[4] if len(sys.argv) > 4 else sp.userid
 
     playlist_uris = [playlist.uri for playlist in sp.playlists_request(username).contents.items]
     playlists = [sp.playlist_request(playlist_uri) for playlist_uri in playlist_uris]

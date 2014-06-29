@@ -528,7 +528,7 @@ class SpotifyReasonField():
 class SpotifyReason():
     def __init__(self, spotify, obj):
         self.spotify = spotify
-        self.text    = obj.text        
+        self.text    = obj.text
         self.fields  = []
         i = 0
         for field in obj.fields:
@@ -582,7 +582,7 @@ class SpotifyRadio(object):
     def getTitle(self):
         return self.title
 
-    def getImages(self):        
+    def getImages(self):
         if self.obj != None and self.obj.imageUri != None:
             image_id = ""
             if self.obj.imageUri.startswith('spotify:image:'):
@@ -626,12 +626,12 @@ class Spotify():
         self.tunigo = Tunigo()
 
     def logged_in(self):
-        return self.api.is_logged_in and not self.api.disconnecting
+        return self.api.is_logged_in
 
     def logout(self):
         self.api.disconnect()
 
-    @Cache     
+    @Cache
     def getMyMusic(self, type="albums"):
         uris = []
         collection = self.api.my_music_request(type)
@@ -641,9 +641,9 @@ class Spotify():
 
     @Cache
     def getPlaylists(self, username=None):
-        username = self.api.username if username is None else username
+        username = self.api.userid if username is None else username
         playlist_uris = []
-        if username == self.api.username:
+        if username == self.api.userid:
             playlist_uris += ["spotify:user:"+username+":starred"]
 
         playlist_uris += [playlist.uri for playlist in self.api.playlists_request(username).contents.items]
@@ -790,7 +790,7 @@ class Spotify():
         playlists = []
         for item_json in pl_json['items']:
             playlist_uri  = item_json['playlist']['uri']
-            
+
             uri_parts = playlist_uri.split(':')
             if len(uri_parts) < 2:
                 continue
@@ -835,7 +835,7 @@ class Spotify():
                 size = 320
             elif size <= 640:
                 size = 640
-            
+
             image_id = SpotifyUtil.gid2id(image_obj.file_id) if must_convert_to_id else image_obj.file_id
             image_url = Spotify.imageFromId(image_id, size)
             if image_url != None:
@@ -844,7 +844,7 @@ class Spotify():
         return images
 
     @staticmethod
-    def imageFromId(image_id, size):        
+    def imageFromId(image_id, size):
         if image_id == "00000000000000000000000000000000":
             image_url = None
         else:
