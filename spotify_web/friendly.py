@@ -4,13 +4,19 @@ from threading import Thread
 from Queue import Queue
 from urllib2 import urlopen
 from contextlib import closing
+import os.path
 
 from .spotify import SpotifyAPI, SpotifyUtil
 from tunigoapi import Tunigo
 
 import uuid
 
-# from spotify_web.proto import mercury_pb2, metadata_pb2
+CONFIG_STORAGE = os.path.abspath(os.path.expanduser('~/.spotifywebapirc'))
+
+
+class StoredSettings():
+    def __init__(self, settings):
+        self.settings = settings
 
 
 class Cache(object):
@@ -619,11 +625,41 @@ class SpotifyRadioGenre(SpotifyRadio):
 class Spotify():
     AUTOREPLACE_TRACKS = True
 
-    def __init__(self, username, password):
-        self.api = SpotifyAPI()
+    def __init__(self, username, password, use_config=False):
+        if use_config:
+            def on_login(success):
+                if success:
+                    self.store_settings(self.api.settings)
+
+            self.api = SpotifyAPI(on_login, self.load_settings())
+        else:
+            self.api = SpotifyAPI()
+
         self.api.connect(username, password)
 
         self.tunigo = Tunigo()
+
+    def load_settings(self):
+        import cPickle
+
+        if not os.path.exists(CONFIG_STORAGE):
+            return None
+
+        with open(CONFIG_STORAGE, 'r') as f:
+            stored_settings = cPickle.load(f)
+
+        return None if stored_settings is None else stored_settings.settings
+
+    def store_settings(self, settings):
+        assert settings
+
+        import cPickle
+
+        with open(CONFIG_STORAGE, 'w') as f:
+            cPickle.dump(StoredSettings(settings=settings), f)
+
+    def reconnect(self):
+        return self.api.reconnect()
 
     def logged_in(self):
         return self.api.is_logged_in

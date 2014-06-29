@@ -165,7 +165,7 @@ class SpotifyAPI():
     DISCONNECTING = 3
     DISCONNECTED = 4
 
-    def __init__(self, login_callback_func=None):
+    def __init__(self, login_callback_func=None, settings=None):
         self.auth_server = "play.spotify.com"
 
         self.logged_in_marker = Event()
@@ -179,7 +179,7 @@ class SpotifyAPI():
 
         self._cached_facebook_token = None
 
-        self.settings = None
+        self.settings = settings
 
         self.state = SpotifyAPI.INIT
 
@@ -187,7 +187,7 @@ class SpotifyAPI():
         self.ws_lock = RLock()
         self.seq = 0
         self.cmd_promises = {}
-        self.login_callback_func = login_callback_func or (lambda x: self.logged_in_marker.set())
+        self.login_callback_func = login_callback_func
 
     @property
     def is_logged_in(self):
@@ -202,7 +202,7 @@ class SpotifyAPI():
             else:
                 self.state = SpotifyAPI.CONNECTING
 
-        if not self.auth(username, password):
+        if not self.settings and not self.auth(username, password):
             return False
 
         self.username = username
@@ -254,12 +254,11 @@ class SpotifyAPI():
 
             self.logged_in_marker = Event()
 
-            self.settings = None
-
             self.seq = 0
             self.cmd_promises = {}
 
             self.state = SpotifyAPI.DISCONNECTED
+            Logging.debug("Disconnected")
 
     def shutdown(self):
         Logging.debug("Shutting down...")
@@ -318,6 +317,14 @@ class SpotifyAPI():
             self.username = username
             self.password = password
 
+        def early_exit(err):
+            Logging.error(err)
+
+            if self.login_callback_func:
+                self.login_callback_func(False)
+
+            return False
+
         Logging.debug("Authenticating...")
 
         headers = {
@@ -334,9 +341,8 @@ class SpotifyAPI():
         r = rx.search(data)
 
         if not r or len(r.groups()) < 1:
-            Logging.error("There was a problem authenticating, no auth secret found")
-            self.login_callback_func(False)
-            return False
+            early_exit("There was a problem authenticating, no auth secret found")
+
         secret = r.groups()[0]
 
         #trackingID
@@ -344,9 +350,8 @@ class SpotifyAPI():
         r = rx.search(data)
 
         if not r or len(r.groups()) < 1:
-            Logging.error("There was a problem authenticating, no auth trackingId found")
-            self.login_callback_func(False)
-            return False
+            early_exit("There was a problem authenticating, no auth trackingId found")
+
         trackingId = r.groups()[0]
 
         #referrer
@@ -354,9 +359,8 @@ class SpotifyAPI():
         r = rx.search(data)
 
         if not r or len(r.groups()) < 1:
-            Logging.error("There was a problem authenticating, no auth referrer found")
-            self.login_callback_func(False)
-            return False
+            early_exit("There was a problem authenticating, no auth referrer found")
+
         referrer = r.groups()[0]
 
         #landingURL
@@ -364,9 +368,8 @@ class SpotifyAPI():
         r = rx.search(data)
 
         if not r or len(r.groups()) < 1:
-            Logging.error("There was a problem authenticating, no auth landingURL found")
-            self.login_callback_func(False)
-            return False
+            early_exit("There was a problem authenticating, no auth landingURL found")
+
         landingURL = r.groups()[0]
 
         login_payload = {
@@ -410,9 +413,7 @@ class SpotifyAPI():
             resp_json = resp.json()
 
             if resp_json["status"] != "OK":
-                Logging.error("There was a problem authenticating, authentication failed: {}".format(resp_json))
-                self.login_callback_func(False)
-                return False
+                early_exit("There was a problem authenticating, authentication failed: {}".format(resp_json))
 
         self.settings = resp.json()["config"]
 
@@ -470,7 +471,10 @@ class SpotifyAPI():
             Logging.error("Please upgrade to Premium")
             self.disconnect()
 
-        self.login_callback_func(self.is_logged_in)
+        self.logged_in_marker.set()
+
+        if self.login_callback_func:
+            self.login_callback_func(self.is_logged_in)
 
     def track_uri(self, track, callback=None, prefix="mp3160"):
         track = self.recurse_alternatives(track)
@@ -1149,7 +1153,8 @@ class SpotifyAPI():
                 Logging.debug("Sending pong %s" % pong)
                 self.send_command("sp/pong_flash2", [pong, ])
         elif cmd == "login_complete":
-            self.login_callback(None)
+            pass
+            # self.login_callback(None)
 
     def handle_error(self, err):
         if len(err) < 2:
