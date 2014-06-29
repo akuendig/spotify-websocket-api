@@ -198,7 +198,7 @@ def command_prev(*args):
 
 
 def command_info(*args):
-    print "Username: " + spotify.api.username
+    print "Username: " + spotify.api.userid
     print "Account type: " + spotify.api.account_type
     print "Country: " + spotify.api.country
     print "Connected to " + spotify.api.settings["wss"].replace("wss://", "").replace(":443", "").replace("/", "")
