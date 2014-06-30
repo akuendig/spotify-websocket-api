@@ -89,7 +89,7 @@ class SpotifyClient(WebSocketClient):
         self.api_object.recv_packet(m)
 
     def closed(self, code, message=None):
-        self.api_object.disconnect()
+        self.api_object.disconnect(original_ws=self)
 
 
 class SpotifyUtil():
@@ -223,7 +223,8 @@ class SpotifyAPI():
                 return False
 
         if not self.logged_in_marker.wait(timeout=timeout):
-            self.disconnect(True)
+            Logging.debug("Aborting after unsuccessfully connecting for {} seconds.")
+            self.disconnect()
             return False
         else:
             return self.is_logged_in
@@ -238,14 +239,23 @@ class SpotifyAPI():
         while not self.connect(self.username, self.password, timeout=10):
             Logging.debug("Unsuccessful login")
 
-    def disconnect(self, clear_settings=False):
+    def disconnect(self, clear_settings=False, original_ws=None):
         with self.ws_lock:
             if self.state == SpotifyAPI.INIT or self.ws is None:
+                # Nothing to do when we have not connected
                 return
             elif self.state == SpotifyAPI.DISCONNECTING or self.state == SpotifyAPI.DISCONNECTED:
+                # Nothing to do if we are already disconnected
                 return
-            else:
-                self.state = SpotifyAPI.DISCONNECTING
+            elif original_ws and self.ws is not original_ws:
+                # Prevent old web socket that disconnects from closing the already opened
+                # new web socket.
+                return
+            elif self.state == SpotifyAPI.CONNECTING:
+                # We assume that something went wrong and that we need to start from scratch
+                clear_settings = True
+
+            self.state = SpotifyAPI.DISCONNECTING
 
             Logging.debug("Disconnecting...")
 
@@ -474,7 +484,7 @@ class SpotifyAPI():
                 self.heartbeat_thread.start()
         else:
             Logging.error("Please upgrade to Premium")
-            self.disconnect(True)
+            self.disconnect()
 
         self.logged_in_marker.set()
 
@@ -493,44 +503,6 @@ class SpotifyAPI():
 
         args = [prefix, SpotifyUtil.gid2id(track.gid)]
         return self.wrap_request("sp/track_uri", args, callback)
-
-    def parse_metadata(self, resp):
-        header = mercury_pb2.MercuryReply()
-        header.ParseFromString(base64.decodestring(resp[0]))
-
-        if header.status_message == "vnd.spotify/mercury-mget-reply":
-            if len(resp) < 2:
-                return False
-
-            mget_reply = mercury_pb2.MercuryMultiGetReply()
-            mget_reply.ParseFromString(base64.decodestring(resp[1]))
-            items = []
-
-            for reply in mget_reply.reply:
-                if reply.status_code != 200:
-                    continue
-
-                item = self.parse_metadata_item(reply.content_type, reply.body)
-                items.append(item)
-
-            return items
-        else:
-            return self.parse_metadata_item(header.status_message, base64.decodestring(resp[1]))
-
-    def parse_metadata_item(self, content_type, body):
-        if content_type == "vnd.spotify/metadata-album":
-            obj = metadata_pb2.Album()
-        elif content_type == "vnd.spotify/metadata-artist":
-            obj = metadata_pb2.Artist()
-        elif content_type == "vnd.spotify/metadata-track":
-            obj = metadata_pb2.Track()
-        else:
-            Logging.error("Unrecognised metadata type " + content_type)
-            return False
-
-        obj.ParseFromString(body)
-
-        return obj
 
     def is_track_available(self, track, country):
         allowed_countries = []
@@ -631,6 +603,46 @@ class SpotifyAPI():
         args = self.generate_multiget_args(SpotifyUtil.get_uri_type(uris[0]), mercury_requests)
 
         return self.wrap_request("sp/hm_b64", args, callback, self.parse_metadata)
+
+    @staticmethod
+    def parse_metadata(resp):
+        header = mercury_pb2.MercuryReply()
+        header.ParseFromString(base64.decodestring(resp[0]))
+
+        if header.status_message == "vnd.spotify/mercury-mget-reply":
+            if len(resp) < 2:
+                return False
+
+            mget_reply = mercury_pb2.MercuryMultiGetReply()
+            mget_reply.ParseFromString(base64.decodestring(resp[1]))
+            items = []
+
+            for reply in mget_reply.reply:
+                if reply.status_code != 200:
+                    continue
+
+                item = SpotifyAPI.parse_metadata_item(reply.content_type, reply.body)
+                items.append(item)
+
+            return items
+        else:
+            return SpotifyAPI.parse_metadata_item(header.status_message, base64.decodestring(resp[1]))
+
+    @staticmethod
+    def parse_metadata_item(content_type, body):
+        if content_type == "vnd.spotify/metadata-album":
+            obj = metadata_pb2.Album()
+        elif content_type == "vnd.spotify/metadata-artist":
+            obj = metadata_pb2.Artist()
+        elif content_type == "vnd.spotify/metadata-track":
+            obj = metadata_pb2.Track()
+        else:
+            Logging.error("Unrecognised metadata type " + content_type)
+            return False
+
+        obj.ParseFromString(body)
+
+        return obj
 
     def toplist_request(self, toplist_content_type="track", toplist_type="user", username=None, region="global",
                         callback=None):
